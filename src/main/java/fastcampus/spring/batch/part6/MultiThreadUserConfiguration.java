@@ -1,8 +1,11 @@
-package fastcampus.spring.batch.part4;
+package fastcampus.spring.batch.part6;
 
+import fastcampus.spring.batch.part4.LevelUpJobExecutionListener;
+import fastcampus.spring.batch.part4.SaveUserTasklet;
+import fastcampus.spring.batch.part4.User;
+import fastcampus.spring.batch.part4.UserRepository;
 import fastcampus.spring.batch.part5.JobParametersDecide;
 import fastcampus.spring.batch.part5.OrderStatistics;
-import jdk.nashorn.internal.scripts.JO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
@@ -26,6 +29,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.task.TaskExecutor;
 
 import javax.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
@@ -37,26 +41,29 @@ import java.util.Map;
 
 @Configuration
 @Slf4j
-public class UserConfiguration {
+public class MultiThreadUserConfiguration {
 
-    private final String JOB_NAME = "userJob";
+    private final String JOB_NAME = "multiThreadUserJob";
     private final int CHUNK = 1000;
     private final JobBuilderFactory jobBuilderFactory;
     private final StepBuilderFactory stepBuilderFactory;
     private final UserRepository userRepository;
     private final EntityManagerFactory entityManagerFactory;
     private final DataSource dataSource;
+    private final TaskExecutor taskExecutor;
 
-    public UserConfiguration(JobBuilderFactory jobBuilderFactory,
-                             StepBuilderFactory stepBuilderFactory,
-                             UserRepository userRepository,
-                             EntityManagerFactory entityManagerFactory,
-                             DataSource dataSource) {
+    public MultiThreadUserConfiguration(JobBuilderFactory jobBuilderFactory,
+                                        StepBuilderFactory stepBuilderFactory,
+                                        UserRepository userRepository,
+                                        EntityManagerFactory entityManagerFactory,
+                                        DataSource dataSource,
+                                        TaskExecutor taskExecutor) {
         this.jobBuilderFactory = jobBuilderFactory;
         this.stepBuilderFactory = stepBuilderFactory;
         this.userRepository = userRepository;
         this.entityManagerFactory = entityManagerFactory;
         this.dataSource = dataSource;
+        this.taskExecutor = taskExecutor;
     }
 
     @Bean(JOB_NAME)
@@ -149,6 +156,8 @@ public class UserConfiguration {
                 .reader(itemReader())
                 .processor(itemProcessor())
                 .writer(itemWriter())
+                .taskExecutor(this.taskExecutor)
+                .throttleLimit(8) //쓰레드 갯수
                 .build();
     }
 

@@ -1,15 +1,23 @@
-package fastcampus.spring.batch.part4;
+package fastcampus.spring.batch.part6;
 
+import fastcampus.spring.batch.part4.LevelUpJobExecutionListener;
+import fastcampus.spring.batch.part4.SaveUserTasklet;
+import fastcampus.spring.batch.part4.User;
+import fastcampus.spring.batch.part4.UserRepository;
 import fastcampus.spring.batch.part5.JobParametersDecide;
 import fastcampus.spring.batch.part5.OrderStatistics;
-import jdk.nashorn.internal.scripts.JO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.JobScope;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.partition.PartitionHandler;
+import org.springframework.batch.core.partition.support.TaskExecutorPartitionHandler;
+import org.springframework.batch.integration.async.AsyncItemProcessor;
+import org.springframework.batch.integration.async.AsyncItemWriter;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
@@ -26,6 +34,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.task.TaskExecutor;
 
 import javax.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
@@ -34,29 +43,33 @@ import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 @Configuration
 @Slf4j
-public class UserConfiguration {
+public class PartitionUserConfiguration {
 
-    private final String JOB_NAME = "userJob";
+    private final String JOB_NAME = "partitionUserJob";
     private final int CHUNK = 1000;
     private final JobBuilderFactory jobBuilderFactory;
     private final StepBuilderFactory stepBuilderFactory;
     private final UserRepository userRepository;
     private final EntityManagerFactory entityManagerFactory;
     private final DataSource dataSource;
+    private final TaskExecutor taskExecutor;
 
-    public UserConfiguration(JobBuilderFactory jobBuilderFactory,
-                             StepBuilderFactory stepBuilderFactory,
-                             UserRepository userRepository,
-                             EntityManagerFactory entityManagerFactory,
-                             DataSource dataSource) {
+    public PartitionUserConfiguration(JobBuilderFactory jobBuilderFactory,
+                                      StepBuilderFactory stepBuilderFactory,
+                                      UserRepository userRepository,
+                                      EntityManagerFactory entityManagerFactory,
+                                      DataSource dataSource,
+                                      TaskExecutor taskExecutor) {
         this.jobBuilderFactory = jobBuilderFactory;
         this.stepBuilderFactory = stepBuilderFactory;
         this.userRepository = userRepository;
         this.entityManagerFactory = entityManagerFactory;
         this.dataSource = dataSource;
+        this.taskExecutor = taskExecutor;
     }
 
     @Bean(JOB_NAME)
@@ -64,7 +77,7 @@ public class UserConfiguration {
         return this.jobBuilderFactory.get(JOB_NAME)
                 .incrementer(new RunIdIncrementer())
                 .start(this.saveUserStep())
-                .next(this.userLevelUpStep())
+                .next(this.userLevelUpManagerStep())
                 .listener(new LevelUpJobExecutionListener(userRepository))
                 .next(new JobParametersDecide("date"))
                 .on(JobParametersDecide.CONTINUE.getName())
@@ -145,35 +158,70 @@ public class UserConfiguration {
     @Bean(JOB_NAME + "_userLevelUpStep")
     public Step userLevelUpStep() throws Exception {
         return this.stepBuilderFactory.get(JOB_NAME + "_userLevelUpStep")
-                .<User, User>chunk(CHUNK)
-                .reader(itemReader())
+                .<User, Future<User>>chunk(CHUNK)
+                .reader(itemReader(null, null))
                 .processor(itemProcessor())
                 .writer(itemWriter())
                 .build();
     }
 
-    private ItemWriter<? super User> itemWriter() {
-        return users -> {
-            users.forEach(x -> {
-                x.levelUp();
-                userRepository.save(x);
-            });
-        };
+    @Bean(JOB_NAME + "_userLevelUpStep.manager")
+    public Step userLevelUpManagerStep() throws Exception {
+        return stepBuilderFactory.get(JOB_NAME + "_userLevelUpStep.manager")
+                .partitioner(JOB_NAME + "_userLevelUpStep", new UserLevelUpPartitioner(userRepository))
+                .step(userLevelUpStep())
+                .partitionHandler(taskExecutorPartitionHandler())
+                .build();
     }
 
-    private ItemProcessor<? super User, ? extends User> itemProcessor() {
-        return user -> {
+    @Bean(JOB_NAME + "_taskExecutorPartitionHandler")
+    PartitionHandler taskExecutorPartitionHandler() throws Exception {
+        TaskExecutorPartitionHandler handler = new TaskExecutorPartitionHandler();
+        handler.setStep(userLevelUpStep());
+        handler.setTaskExecutor(this.taskExecutor);
+        handler.setGridSize(8);
+
+        return handler;
+    }
+
+    private AsyncItemWriter<User> itemWriter() {
+        ItemWriter<User> itemWriter = users -> users.forEach(x -> {
+            x.levelUp();
+            userRepository.save(x);
+        });
+        AsyncItemWriter<User> asyncItemWriter = new AsyncItemWriter<>();
+        asyncItemWriter.setDelegate(itemWriter);
+
+        return asyncItemWriter;
+    }
+
+    private AsyncItemProcessor<User, User> itemProcessor() {
+        ItemProcessor<User, User> itemProcessor = user -> {
             if (user.availableLevelUP()) {
                 return user;
             }
-
             return null;
         };
+
+        AsyncItemProcessor<User, User> asyncItemProcessor = new AsyncItemProcessor<>();
+        asyncItemProcessor.setDelegate(itemProcessor);
+        asyncItemProcessor.setTaskExecutor(this.taskExecutor);
+
+        return asyncItemProcessor;
     }
 
-    private ItemReader<? extends User> itemReader() throws Exception {
+    @Bean
+    @StepScope
+    JpaPagingItemReader<? extends User> itemReader(@Value("#{stepExecutionContext[minId]}") Long minId,
+                                          @Value("#{stepExecutionContext[maxId]}") Long maxId) throws Exception {
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put("minId", minId);
+        parameters.put("maxId", maxId);
+
+
         JpaPagingItemReader<User> itemReader = new JpaPagingItemReaderBuilder<User>()
-                .queryString("select u from User u")
+                .queryString("select u from User u where u.id between :minId and :maxId")
+                .parameterValues(parameters)
                 .entityManagerFactory(entityManagerFactory)
                 .pageSize(CHUNK)
                 .name(JOB_NAME + "_userItemReader")

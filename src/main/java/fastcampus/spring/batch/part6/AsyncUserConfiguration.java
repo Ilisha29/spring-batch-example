@@ -1,8 +1,11 @@
-package fastcampus.spring.batch.part4;
+package fastcampus.spring.batch.part6;
 
+import fastcampus.spring.batch.part4.LevelUpJobExecutionListener;
+import fastcampus.spring.batch.part4.SaveUserTasklet;
+import fastcampus.spring.batch.part4.User;
+import fastcampus.spring.batch.part4.UserRepository;
 import fastcampus.spring.batch.part5.JobParametersDecide;
 import fastcampus.spring.batch.part5.OrderStatistics;
-import jdk.nashorn.internal.scripts.JO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
@@ -10,6 +13,8 @@ import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.JobScope;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.integration.async.AsyncItemProcessor;
+import org.springframework.batch.integration.async.AsyncItemWriter;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
@@ -26,6 +31,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.task.TaskExecutor;
 
 import javax.persistence.EntityManagerFactory;
 import javax.sql.DataSource;
@@ -34,29 +40,33 @@ import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 @Configuration
 @Slf4j
-public class UserConfiguration {
+public class AsyncUserConfiguration {
 
-    private final String JOB_NAME = "userJob";
+    private final String JOB_NAME = "asyncUserJob";
     private final int CHUNK = 1000;
     private final JobBuilderFactory jobBuilderFactory;
     private final StepBuilderFactory stepBuilderFactory;
     private final UserRepository userRepository;
     private final EntityManagerFactory entityManagerFactory;
     private final DataSource dataSource;
+    private final TaskExecutor taskExecutor;
 
-    public UserConfiguration(JobBuilderFactory jobBuilderFactory,
-                             StepBuilderFactory stepBuilderFactory,
-                             UserRepository userRepository,
-                             EntityManagerFactory entityManagerFactory,
-                             DataSource dataSource) {
+    public AsyncUserConfiguration(JobBuilderFactory jobBuilderFactory,
+                                  StepBuilderFactory stepBuilderFactory,
+                                  UserRepository userRepository,
+                                  EntityManagerFactory entityManagerFactory,
+                                  DataSource dataSource,
+                                  TaskExecutor taskExecutor) {
         this.jobBuilderFactory = jobBuilderFactory;
         this.stepBuilderFactory = stepBuilderFactory;
         this.userRepository = userRepository;
         this.entityManagerFactory = entityManagerFactory;
         this.dataSource = dataSource;
+        this.taskExecutor = taskExecutor;
     }
 
     @Bean(JOB_NAME)
@@ -145,30 +155,37 @@ public class UserConfiguration {
     @Bean(JOB_NAME + "_userLevelUpStep")
     public Step userLevelUpStep() throws Exception {
         return this.stepBuilderFactory.get(JOB_NAME + "_userLevelUpStep")
-                .<User, User>chunk(CHUNK)
+                .<User, Future<User>>chunk(CHUNK)
                 .reader(itemReader())
                 .processor(itemProcessor())
                 .writer(itemWriter())
                 .build();
     }
 
-    private ItemWriter<? super User> itemWriter() {
-        return users -> {
-            users.forEach(x -> {
-                x.levelUp();
-                userRepository.save(x);
-            });
-        };
+    private AsyncItemWriter<User> itemWriter() {
+        ItemWriter<User> itemWriter = users -> users.forEach(x -> {
+            x.levelUp();
+            userRepository.save(x);
+        });
+        AsyncItemWriter<User> asyncItemWriter = new AsyncItemWriter<>();
+        asyncItemWriter.setDelegate(itemWriter);
+
+        return asyncItemWriter;
     }
 
-    private ItemProcessor<? super User, ? extends User> itemProcessor() {
-        return user -> {
+    private AsyncItemProcessor<User, User> itemProcessor() {
+        ItemProcessor<User, User> itemProcessor = user -> {
             if (user.availableLevelUP()) {
                 return user;
             }
-
             return null;
         };
+
+        AsyncItemProcessor<User, User> asyncItemProcessor = new AsyncItemProcessor<>();
+        asyncItemProcessor.setDelegate(itemProcessor);
+        asyncItemProcessor.setTaskExecutor(this.taskExecutor);
+
+        return asyncItemProcessor;
     }
 
     private ItemReader<? extends User> itemReader() throws Exception {
