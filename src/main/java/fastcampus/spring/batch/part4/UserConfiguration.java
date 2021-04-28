@@ -68,22 +68,23 @@ public class UserConfiguration {
                 .listener(new LevelUpJobExecutionListener(userRepository))
                 .next(new JobParametersDecide("date"))
                 .on(JobParametersDecide.CONTINUE.getName())
-                .to(this.orderStatisticsStep(null))
+                .to(this.orderStatisticsStep(null, null))
                 .build()
                 .build();
     }
 
     @Bean(JOB_NAME + "orderStatisticsStep")
     @JobScope
-    public Step orderStatisticsStep(@Value("#{jobParameters[date]}") String date) throws Exception {
+    public Step orderStatisticsStep(@Value("#{jobParameters[date]}") String date,
+                                    @Value("#{jobParameters[path]}") String path) throws Exception {
         return this.stepBuilderFactory.get(JOB_NAME + "_orderStatisticsStep")
                 .<OrderStatistics, OrderStatistics>chunk(CHUNK)
                 .reader(orderStatisticsItemReader(date))
-                .writer(orderStatisticsItemWriter(date))
+                .writer(orderStatisticsItemWriter(date, path))
                 .build();
     }
 
-    private ItemWriter<? super OrderStatistics> orderStatisticsItemWriter(String date) throws Exception {
+    private ItemWriter<? super OrderStatistics> orderStatisticsItemWriter(String date, String path) throws Exception {
         YearMonth yearMonth = YearMonth.parse(date);
 
         String fileName = yearMonth.getYear() + "년" + yearMonth.getMonthValue() + "월_일별_주문_금액.csv";
@@ -96,7 +97,7 @@ public class UserConfiguration {
         lineAggregator.setFieldExtractor(filedExtractor);
 
         FlatFileItemWriter<OrderStatistics> itemWriter = new FlatFileItemWriterBuilder<OrderStatistics>()
-                .resource(new FileSystemResource("output/" + fileName))
+                .resource(new FileSystemResource(path + fileName))
                 .lineAggregator(lineAggregator)
                 .name(JOB_NAME + "_orderStatisticsItemWriter")
                 .encoding("UTF-8")
