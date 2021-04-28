@@ -26,7 +26,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
 
 import javax.persistence.EntityManagerFactory;
-import java.awt.*;
 
 @Configuration
 @Slf4j
@@ -64,6 +63,8 @@ public class SavePersonConfiguration {
                 .faultTolerant()
                 .skip(NotFoundNameException.class)
                 .skipLimit(3)
+                .retry(NotFoundNameException.class)
+                .retryLimit(3)
                 .build();
     }
 
@@ -80,7 +81,7 @@ public class SavePersonConfiguration {
         };
 
         CompositeItemProcessor<Person, Person> itemProcessor = new CompositeItemProcessorBuilder()
-                .delegates(validationProcessor, duplicateValidationProcessor)
+                .delegates(new PersonValidationRetryProcessor(), validationProcessor, duplicateValidationProcessor)
                 .build();
 
         itemProcessor.afterPropertiesSet();
@@ -124,4 +125,5 @@ public class SavePersonConfiguration {
         itemReader.afterPropertiesSet();
         return itemReader;
     }
+
 }
